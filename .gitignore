@@ -1,0 +1,8 @@
+.env
+__pycache__/
+output/
+*.log
+.agent/
+.gemini/
+*.mp3
+*.pdf
