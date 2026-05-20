@@ -63,7 +63,7 @@ def get_eodhd_earnings(ticker):
 
 def synthesize_missing_data(row, fundamentals=None):
     """Use Gemini to infer missing fields and translate content to German."""
-    model = genai.GenerativeModel('models/gemini-flash-latest')
+    model = genai.GenerativeModel('gemini-3-flash')
     
     ticker = row.get('ticker_eod')
     current_content = row.get('markdown_content') or ''

@@ -5,6 +5,9 @@ description: >
   Modularized into Data Population (Supabase SSOT) and Institutional Editing (Artifact Production).
 ---
 
+## 0. Assistant Execution Mandate
+**CRITICAL**: When the user requests to run a generation, process a ticker, or execute a pipeline stage, you **MUST** use the `run_command` tool to execute the corresponding Python scripts. Do **NOT** just generate plain text or markdown responses with the report content. You are an autonomous operator; execute the code to generate the actual HTML, PDF, and Audio artifacts.
+
 ## 1. Modular Architecture
 
 | Module | Role | Responsible Tools |

@@ -2,10 +2,10 @@
 import os
 import sys
 import json
+import time
 import requests
-import argparse
 import google.generativeai as genai
-from datetime import datetime
+from datetime import datetime, timezone
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -102,7 +102,7 @@ def build_counterpoint_section(metrics: dict, ticker: str, company_name: str, in
     if pe and pe > 30:
         points.append(f"From a valuation standpoint, {company_name}'s trailing P/E ratio of {pe:.1f}x sits at a premium relative to market averages, demanding strict execution matching.")
     elif pe and pe > 0:
-        points.append(f"While {company_name}'s trailing P/E of {pe:.1f}x appears balanced in isolation, macro multiple compression could test price stability.")
+        points.append(f"While {company_name}'s trailing P/E of {pe:.1f}x appears balanced in isolation, macro multiple multiple compression could test price stability.")
     else:
         points.append(f"The absence of a clear trailing P/E multiple introduces valuation opacity for {ticker}, requiring asset alignment cross-checks.")
 
@@ -184,7 +184,8 @@ def generate_1500_word_narrative(ticker, company_name, industry, revenue, impact
 
     print(f"🤖 Context parameters mapped. Requesting grounded model expansion for {ticker}...")
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # UPDATED: Target the Gemini 3 Flash preview string
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         response = model.generate_content(prompt)
         return response.text
     except Exception as err:
@@ -247,11 +248,19 @@ def process_ticker(ticker, period="Q1 2026"):
     eps_estimate = latest_earnings.get("epsEstimate")
 
     update_payload = {
-        "ticker_eod": ticker, "fiscal_period": period, "company_name": company_name,
-        "analysis_date": datetime.now().strftime("%Y-%m-%d"), "impact_score": impact_score,
-        "guidance_signal": guidance, "recommendation": None, "markdown_content": markdown_content,
-        "eps_actual": eps_actual, "eps_estimate": eps_estimate, "revenue_actual": revenue,
-        "review_status": "approved", "updated_at": datetime.now().isoformat()
+        "ticker_eod": ticker, 
+        "fiscal_period": period, 
+        "company_name": company_name,
+        "analysis_date": datetime.now().strftime("%Y-%m-%d"), 
+        "impact_score": impact_score,
+        "guidance_signal": guidance, 
+        "recommendation": None, 
+        "markdown_content": markdown_content,
+        "eps_actual": eps_actual, 
+        "eps_estimate": eps_estimate, 
+        "revenue_actual": revenue_val,
+        "review_status": "approved", 
+        "updated_at": datetime.now(timezone.utc).isoformat()
     }
 
     try:

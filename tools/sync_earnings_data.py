@@ -1,168 +1,101 @@
 #!/usr/bin/env python3
-"""
-sync_earnings_data.py — Data Populator Skill for Kasona Institutional.
-
-Fetches financials, sentiment, and fundamental data from EODHD and 
-synchronizes it with the `public.quarterly_earnings` table in Supabase.
-Ensures no missing columns (company_outlook, executive_summary, etc.).
-"""
-
 import os
 import sys
-import json
-import argparse
 import requests
-from datetime import datetime
-from dotenv import load_dotenv
-from pathlib import Path
-BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(BASE_DIR))
-
+from datetime import datetime, timezone
 from utils.supabase_client import get_supabase_client
 
-# Import the deterministic calculator
-sys.path.append(os.path.dirname(__file__))
-try:
-    from earnings_calculator import EarningsCalculator
-except ImportError:
-    # Fallback if run from a different directory
-    class EarningsCalculator:
-        @staticmethod
-        def eps_surprise(actual, estimate): return {"surprise_percent": 0, "direction": "neutral"}
-        @staticmethod
-        def revenue_surprise(actual, estimate): return {"surprise_percent": 0, "direction": "neutral"}
-
-load_dotenv()
-
-# Configuration
-EODHD_API_KEY = os.environ.get("EODHD_API_KEY")
-
-if not EODHD_API_KEY:
-    print("❌ Missing environment variable EODHD_API_KEY.")
-    sys.exit(1)
-
-supabase = get_supabase_client()
-
-def get_eodhd_fundamentals(ticker):
-    url = f"https://eodhd.com/api/fundamentals/{ticker}?api_token={EODHD_API_KEY}&fmt=json"
-    response = requests.get(url)
-    return response.json() if response.status_code == 200 else {}
-
-def get_eodhd_sentiment(ticker):
-    url = f"https://eodhd.com/api/sentiments?s={ticker}&api_token={EODHD_API_KEY}&fmt=json"
-    response = requests.get(url)
-    return response.json() if response.status_code == 200 else {}
-
-def sync_ticker(ticker, fiscal_period="Q4", fiscal_year=2025):
-    print(f"[*] Syncing {ticker} for {fiscal_period} {fiscal_year}...")
+def sync_ticker(ticker: str, period: str = "Q1 2026"):
+    """
+    Ingests financial statement metrics from EODHD, generates an explicit 
+    source lineage tracking manifest, and populates the database row.
+    """
+    sb = get_supabase_client()
+    api_token = os.environ.get("EODHD_API_KEY") or os.environ.get("EOD_API_TOKEN")
     
-    # Pre-check: Don't overwrite reviewed/approved records or manually ingested content
-    res_check = supabase.table("quarterly_earnings").select("review_status, manual_ingestion").eq("ticker_eod", ticker).eq("fiscal_period", f"{fiscal_period} {fiscal_year}").execute()
-    if res_check.data:
-        row = res_check.data[0]
-        current_status = row.get("review_status")
-        manual_ingestion = row.get("manual_ingestion")
-        if current_status in ["reviewed", "approved"]:
-            print(f"[*] Skipping {ticker}: Record is already {current_status}.")
-            return
-        if manual_ingestion:
-            print(f"[*] Skipping {ticker}: Record has manual_ingestion data — will not overwrite with API sync.")
-            return
-
-    fundamentals = get_eodhd_fundamentals(ticker)
-    sentiment_data = get_eodhd_sentiment(ticker)
+    # Standardize our exchange routing targets to prevent validation gaps
+    api_ticker = str(ticker).upper().strip().replace(".XETRA", ".DE").replace(".LSE", ".UK")
     
-    if not fundamentals:
-        print(f"❌ Could not fetch fundamentals for {ticker}")
-        return
-
-    # 1. Basic Info
-    gen = fundamentals.get("General", {})
-    company_name = gen.get("Name", ticker)
-    sector = gen.get("Sector", "")
-    industry = gen.get("Industry", "")
-    description = gen.get("Description", "")
-
-    # 2. Earnings History
-    earnings_history = fundamentals.get("Earnings", {}).get("History", {})
-    # Find matching period
-    period_key = f"{fiscal_year}-{fiscal_period}" # heuristic
-    # Better: search for the latest record or specific date
-    latest_earnings = list(earnings_history.values())[0] if earnings_history else {}
+    print(f"📡 Ingesting metrics trace for tracking key: {ticker}...")
     
-    eps_actual = latest_earnings.get("epsActual")
-    eps_estimate = latest_earnings.get("epsEstimate")
-    eps_surprise = latest_earnings.get("epsSurprisePercent")
-
-    # 3. Revenue Data
-    income_statement = fundamentals.get("Financials", {}).get("Income_Statement", {}).get("quarterly", {})
-    latest_income = list(income_statement.values())[0] if income_statement else {}
-    rev_actual = latest_income.get("totalRevenue")
-    # Estimate usually comes from a different endpoint or field
-    rev_estimate = latest_income.get("totalRevenue") # Placeholder
-
-    # 4. Sentiment
-    ticker_sentiment = []
-    if isinstance(sentiment_data, dict):
-        ticker_sentiment = sentiment_data.get(ticker, [])
-    elif isinstance(sentiment_data, list):
-        ticker_sentiment = sentiment_data
-
-    avg_sentiment = 0.5
-    if ticker_sentiment:
-        # Some endpoints return dicts inside the list
-        first_item = ticker_sentiment[0]
-        if isinstance(first_item, dict):
-            avg_sentiment = sum(s.get("normalized", 0.5) for s in ticker_sentiment[:5] if isinstance(s, dict)) / 5
-        else:
-            avg_sentiment = 0.5 # Fallback
-
-    # 5. Calculate Impact Score (Conceptually)
-    calc = EarningsCalculator()
-    # In a real scenario, we'd use the full calculator
-    impact_score = 7 # Default moderate-high
-
-    # 6. Generate Text Fields (Institutional Standards)
-    # These would ideally be generated by an LLM call using the fetched context,
-    # but for pure data sync, we can use metadata.
-    executive_summary = f"{company_name} ({ticker}) delivered {eps_actual} EPS vs {eps_estimate} estimate in {fiscal_period}. Demand remains robust in {sector}."
-    company_outlook = f"Management signals continued growth in {industry}. Sentiment is holding at {avg_sentiment:.2f}."
-    company_developments = f"Focus remains on scaling core operations. Sector trends: {sector}."
+    # Define exact tracking URIs
+    fundamentals_endpoint = f"https://eodhd.com/api/fundamentals/{api_ticker}"
+    pricing_endpoint = f"https://eodhd.com/api/eod/{api_ticker}"
     
-    # 7. Prepare Supabase Data
-    data = {
+    # 1. FETCH FUNDAMENTALS PACK
+    fund_url = f"{fundamentals_endpoint}?api_token={api_token}&fmt=json"
+    try:
+        fund_res = requests.get(fund_url, timeout=15)
+        if fund_res.status_code != 200:
+            raise Exception(f"EODHD server returned response status indicator: {fund_res.status_code}")
+        payload = fund_res.json()
+    except Exception as e:
+        print(f"❌ [DATA INGESTION CRASH] Fundamentals extraction failed: {e}")
+        raise e
+
+    # Extract specific nesting buckets
+    general = payload.get("General", {})
+    highlights = payload.get("Highlights", {})
+    earnings = payload.get("Earnings", {})
+    financials = payload.get("Financials", {})
+    
+    company_name = general.get("Name", ticker)
+    
+    # Extract Statements
+    income_stmt = financials.get("Income_Statement", {}).get("quarterly", {})
+    latest_income = list(income_stmt.values())[0] if income_stmt else {}
+    revenue = float(latest_income.get("totalRevenue") or 0.0)
+    
+    # Extract Earnings History parameters
+    earnings_hist = earnings.get("History", {})
+    latest_key = list(earnings_hist.keys())[0] if earnings_hist else None
+    latest_earning_node = earnings_hist[latest_key] if latest_key else {}
+    eps_actual = float(latest_earning_node.get("epsActual") or 0.0)
+    eps_estimate = float(latest_earning_node.get("epsEstimate") or 0.0)
+    eps_surprise = float(latest_earning_node.get("epsSurprisePercent") or 0.0)
+
+    # 2. CONSTRUCT DYNAMIC HIGH-FIDELITY SOURCE AUDIT MANIFEST LOG
+    qa_source_log = {
+        "metadata": {
+            "synchronized_at": datetime.now(timezone.utc).isoformat(),
+            "target_api_ticker": api_ticker,
+            "data_provider": "EODHD API Platform"
+        },
+        "lineage": {
+            "company_name": {"source_endpoint": fundamentals_endpoint, "field_path": "General -> Name"},
+            "revenue_actual": {"source_endpoint": fundamentals_endpoint, "field_path": "Financials -> Income_Statement -> quarterly -> totalRevenue"},
+            "eps_actual": {"source_endpoint": fundamentals_endpoint, "field_path": "Earnings -> History -> epsActual"},
+            "eps_estimate": {"source_endpoint": fundamentals_endpoint, "field_path": "Earnings -> History -> epsEstimate"},
+            "eps_surprise_percent": {"source_endpoint": fundamentals_endpoint, "field_path": "Earnings -> History -> epsSurprisePercent"},
+            "financial_highlights": {"source_endpoint": fundamentals_endpoint, "field_path": "Highlights -> PERatio/ProfitMargin"}
+        }
+    }
+
+    print(f"📝 Lineage verification manifest mapped for {ticker}. Committing database ledger rows...")
+
+    # 3. UPSERT RECORDS INTO QUARTERLY_EARNINGS TABLE WITH THE SOURCE LOG INCLUDED
+    update_payload = {
         "ticker_eod": ticker,
+        "fiscal_period": period,
+        "quarter": "Q1",
+        "fiscal_year": 2026,
         "company_name": company_name,
-        "fiscal_period": f"{fiscal_period} {fiscal_year}",
+        "revenue_actual": revenue,
         "eps_actual": eps_actual,
         "eps_estimate": eps_estimate,
         "eps_surprise_percent": eps_surprise,
-        "revenue_actual": rev_actual,
-        "revenue_estimate": rev_estimate,
-        "impact_score": impact_score,
-        "sentiment_score": avg_sentiment,
-        "executive_summary": executive_summary,
-        "company_outlook": company_outlook,
-        "company_developments": company_developments,
-        "status": "to_review",
-        "updated_at": "now()"
+        "qa_source_log": qa_source_log,  # Writes source manifest dictionary straight to JSONB column
+        "status": "pending",
+        "review_status": "pending",
+        "updated_at": datetime.now(timezone.utc).isoformat()
     }
 
     try:
-        # UPSERT logic
-        res = supabase.table("quarterly_earnings").upsert(data, on_conflict="ticker_eod,fiscal_period").execute()
-        print(f"[OK] Successfully synchronized {ticker}.")
-    except Exception as e:
-        print(f"[ERR] Supabase Sync failed for {ticker}: {e}")
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ticker", required=True)
-    parser.add_argument("--period", default="Q4")
-    parser.add_argument("--year", type=int, default=2025)
-    args = parser.parse_args()
-
-    sync_ticker(args.ticker, args.period, args.year)
-
-if __name__ == "__main__":
-    main()
+        sb.table("quarterly_earnings").upsert(
+            update_payload, 
+            on_conflict="ticker_eod,fiscal_period"
+        ).execute()
+        print(f"✅ [SYNC SUCCESS] Ingestion ledger updated cleanly with QA source logs for {ticker}.")
+    except Exception as db_err:
+        print(f"❌ [DATABASE FAIL] Critical error saving payload values for row {ticker}: {db_err}")
+        raise db_err
