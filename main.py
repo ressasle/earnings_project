@@ -139,7 +139,7 @@ class EarningsProcessor:
 def api():
     return web_app
 @web_app.post("/harvest")
-async def trigger_harvest(n8n_callback: str, lookback: int = 14, ticker: str = None):
+async def trigger_harvest(n8n_callback: str, lookback: int = 1, ticker: str = None):
     """
     ASGI Webhook Entrypoint: Forces variable normalization to ensure manual triggers 
     bypass multi-ticker portfolio queues instantly.
